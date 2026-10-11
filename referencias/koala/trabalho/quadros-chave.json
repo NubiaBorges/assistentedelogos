@@ -1,0 +1,17 @@
+{
+  "quadros": [
+    { "n": 1, "entrada": "entrada/logo-palavra.jpg", "svg": "saida/koala-palavra-vetor.svg", "tempo": 1.2,
+      "descricao": "nome KOALA em peças planas (quadro inicial)" },
+    { "n": 2, "entrada": "entrada/logo-koala.jpg", "svg": "saida/koala-logo-vetor.svg", "tempo": 5.0,
+      "descricao": "koala sentado sobre cubos 3D (logo final)" }
+  ],
+  "correspondencia": [
+    { "peca": "K", "quadros": { "1": "peca-K-rosa", "2": "bloco-K-rosa" }, "transicao": "peça plana salta, vira no ar e cai como cubo" },
+    { "peca": "O", "quadros": { "1": "peca-O-azul", "2": "bloco-O-azul" }, "transicao": "idem" },
+    { "peca": "A1", "quadros": { "1": "peca-A-coral", "2": "bloco-A-coral" }, "transicao": "idem" },
+    { "peca": "L", "quadros": { "1": "peca-L-verde", "2": "bloco-L-verde" }, "transicao": "idem" },
+    { "peca": "A2", "quadros": { "1": "peca-A-amarela", "2": "bloco-A-laranja" }, "transicao": "idem" },
+    { "peca": "koala", "quadros": { "2": "koala" }, "entra": 2,
+      "transicao": "espia por trás dos cubos, pula e senta" }
+  ]
+}

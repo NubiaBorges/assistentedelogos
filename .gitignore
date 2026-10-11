@@ -1,0 +1,15 @@
+# Casos de trabalho (material de clientes, gerado localmente)
+logos/*
+!logos/README.md
+
+# Mídia e arquivos gerados (podem ser recriados com as ferramentas)
+*.mp4
+*.webm
+referencias/**/saida/*.html
+referencias/**/saida/*.png
+referencias/**/trabalho/partes.json
+
+# Sistema
+.DS_Store
+Thumbs.db
+desktop.ini

@@ -1,0 +1,464 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Koala Logo Animado</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: #2b2236; font-family: system-ui, 'Segoe UI', sans-serif; color: #fff;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; padding: 16px;
+  }
+  .stage {
+    position: relative; height: min(80vh, calc((100vw - 32px) * 16 / 9)); aspect-ratio: 9 / 16;
+    border-radius: 16px; overflow: hidden; box-shadow: 0 24px 70px rgba(0,0,0,.45);
+  }
+  canvas { width: 100%; height: 100%; display: block; }
+  .overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    background: rgba(40, 20, 70, .18); cursor: pointer; transition: opacity .3s; }
+  .overlay.hidden { opacity: 0; pointer-events: none; }
+  .play-btn { width: 80px; height: 80px; border-radius: 50%; border: none; background: rgba(255,255,255,.94);
+    box-shadow: 0 10px 30px rgba(40,20,80,.35); display: grid; place-items: center; cursor: pointer; }
+  .play-btn svg { margin-left: 6px; }
+  .controls { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+  button.ctl { font: 600 15px system-ui, 'Segoe UI', sans-serif; padding: 11px 20px; border-radius: 999px;
+    border: none; cursor: pointer; background: #BD9FE9; color: #1d1626; }
+  select.ctl { appearance: none; }
+  button.ctl.alt, select.ctl.alt { background: transparent; color: #fff; box-shadow: inset 0 0 0 1.5px rgba(255,255,255,.55); }
+  button.ctl:disabled { opacity: .55; cursor: progress; }
+  .status { font-size: 13px; opacity: .8; min-height: 1em; text-align: center; }
+</style>
+</head>
+<body>
+  <div class="stage">
+    <canvas id="c" width="1080" height="1920"></canvas>
+    <div class="overlay" id="overlay">
+      <button class="play-btn" aria-label="Reproduzir">
+        <svg width="30" height="34" viewBox="0 0 30 34"><path d="M2 2 L28 17 L2 32 Z" fill="#8E6FC9" stroke="#8E6FC9" stroke-width="3" stroke-linejoin="round"/></svg>
+      </button>
+    </div>
+  </div>
+  <div class="controls">
+    <button class="ctl" id="play">▶ Reproduzir</button>
+    <select class="ctl alt" id="fmt" aria-label="Formato"><option value="vertical">Vertical 1080×1920</option><option value="horizontal">Horizontal 1920×1080</option></select>
+    <button class="ctl alt" id="rec">⬇ Baixar vídeo MP4</button>
+  </div>
+  <div class="status" id="status">Clique para assistir com som 🔊</div>
+
+<script>
+// Peças vetoriais do logo refinado (koala-logo-vetor.svg e koala-palavra-vetor.svg)
+const PARTS = __PARTS__;
+
+const DURATION = 5.0, W = 1080, H = 1920;           // espaço de desenho (coordenadas do SVG)
+// Formatos de saída: a "câmera" enquadra a área da cena (FOCO, em coordenadas de desenho) no quadro final.
+const FOCO = { cx: 540, cy: 900 };
+const FORMATOS = { vertical: { w: 1080, h: 1920, s: 1 }, horizontal: { w: 1920, h: 1080, s: 1.3 } };
+let formato = 'vertical', CW = 1080, CH = 1920, VIEW = [1, 0, 0, 1, 0, 0];
+function setFormato(nome) {
+  formato = nome; const f = FORMATOS[nome]; CW = f.w; CH = f.h;
+  canvas.width = CW; canvas.height = CH; tmp.width = CW; tmp.height = CH;
+  VIEW = nome === 'vertical' ? [1, 0, 0, 1, 0, 0] : [f.s, 0, 0, f.s, CW / 2 - FOCO.cx * f.s, CH / 2 - FOCO.cy * f.s];
+  document.querySelector('.stage').style.aspectRatio = `${CW} / ${CH}`;
+  document.querySelector('.stage').style.height = CW > CH ? 'auto' : '';
+  document.querySelector('.stage').style.width = CW > CH ? 'min(92vw, calc(80vh * 16 / 9))' : '';
+}
+const canvas = document.getElementById('c');
+const g = canvas.getContext('2d');
+const tmp = document.createElement('canvas'); tmp.width = W; tmp.height = H;
+
+// ---------- utilidades
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const prog = (t, s, d) => clamp((t - s) / d);
+const lerp = (a, b, k) => a + (b - a) * k;
+const easeOutCubic = x => 1 - Math.pow(1 - x, 3);
+const easeInQuad = x => x * x;
+const easeInOutCubic = x => x < .5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2;
+const easeInOutSine = x => -(Math.cos(Math.PI * x) - 1) / 2;
+const easeOutBack = (x, s = 1.70158) => 1 + (s + 1) * Math.pow(x - 1, 3) + s * Math.pow(x - 1, 2);
+const pulse = (t, s, d) => { const q = prog(t, s, d); return q > 0 && q < 1 ? Math.sin(Math.PI * q) : 0; };
+
+// ---------- geometria das peças
+const P2D = {};
+for (const p of [...PARTS.logo, ...PARTS.word]) P2D[p.id] = new Path2D(p.d);
+const svgHost = document.createElement('div'); svgHost.style.cssText = 'position:absolute;left:-9999px;top:0;width:0;height:0;overflow:hidden';
+document.body.appendChild(svgHost);
+function bboxOf(ds) {
+  svgHost.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg">' + ds.map(d => `<path d="${d}"/>`).join('') + '</svg>';
+  let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+  svgHost.querySelectorAll('path').forEach(p => { const b = p.getBBox(); x0 = Math.min(x0, b.x); y0 = Math.min(y0, b.y); x1 = Math.max(x1, b.x + b.width); y1 = Math.max(y1, b.y + b.height); });
+  return { x0, y0, x1, y1, w: x1 - x0, h: y1 - y0, cx: (x0 + x1) / 2, cy: (y0 + y1) / 2 };
+}
+const byGroup = (list) => { const m = new Map(); for (const p of list) { if (!m.has(p.g)) m.set(p.g, []); m.get(p.g).push(p); } return m; };
+const LG = byGroup(PARTS.logo), WG = byGroup(PARTS.word);
+const BLOCK_IDS = [...LG.keys()].filter(k => k.startsWith('bloco-'));
+const KOALA_IDS = [...LG.keys()].filter(k => !k.startsWith('bloco-'));
+const TILE_IDS = [...WG.keys()];
+const BLOCK_BOX = BLOCK_IDS.map(id => bboxOf(LG.get(id).filter(p => !p.id.includes('letra')).map(p => p.d)));
+const TILE_BOX = TILE_IDS.map(id => bboxOf(WG.get(id).filter(p => p.id.endsWith('-base')).map(p => p.d)));
+const KOALA_BOX = bboxOf(KOALA_IDS.flatMap(id => LG.get(id).map(p => p.d)));
+const EAR_L = bboxOf(LG.get('orelha-esquerda').map(p => p.d)), EAR_R = bboxOf(LG.get('orelha-direita').map(p => p.d));
+const EYE = { 'olho-esquerdo': bboxOf([PARTS.logo.find(p => p.id === 'olho-esquerdo').d]), 'olho-direito': bboxOf([PARTS.logo.find(p => p.id === 'olho-direito').d]) };
+const ANCHOR = { x: KOALA_BOX.cx, y: 1128 };          // base do koala, onde ele toca os blocos
+const PIVOT_L = { x: EAR_L.x1 - 18, y: EAR_L.y1 - 22 }, PIVOT_R = { x: EAR_R.x0 + 18, y: EAR_R.y1 - 22 };
+
+// ---------- timeline
+// Cubos de brinquedo: aparecem como peças planas, agacham, saltam virando no ar e caem como cubos.
+const TILE_START = 0.2, TILE_STEP = 0.14, TILE_DUR = 0.5;
+const SWEEP1 = 1.12;
+const HOP0 = 1.55, HOP_STEP = 0.1, HOP_DUR = 0.62;
+const hopLand = i => HOP0 + i * HOP_STEP + HOP_DUR * 0.85;
+// Koala: espia por trás dos cubos, olha em volta, toma impulso, pula e senta.
+const PEEK0 = 2.55, PEEK1 = 2.9, CROUCH = 3.08, JUMP = 3.18, JUMP_DUR = 0.37, LAND = JUMP + JUMP_DUR;
+const FEET = LAND + 0.08, EARS = LAND + 0.05, TILT = 3.95, BLINK = 4.22;
+const SWEEP2 = 3.85, SPARKLE_START = 3.8;
+const HIDDEN = 430, PEEK_Y = 210, CROUCH_Y = 250, JUMP_H = 220;
+
+const sparkles = [[318, 700, 26], [770, 680, 30], [262, 980, 20], [822, 960, 24],
+                  [420, 600, 18], [690, 585, 22], [255, 1250, 16], [830, 1262, 20], [540, 540, 14]];
+const NECK = { x: 540, y: 990 };
+const FOOT_L = bboxOf(LG.get('pe-esquerdo').map(p => p.d)), FOOT_R = bboxOf(LG.get('pe-direito').map(p => p.d));
+const PIV_FL = { x: FOOT_L.x1 - 14, y: FOOT_L.y0 + 16 }, PIV_FR = { x: FOOT_R.x0 + 14, y: FOOT_R.y0 + 16 };
+
+// ---------- desenho
+const fill = (c, p) => { c.fillStyle = p.fill; c.fill(P2D[p.id], p.rule); };
+// desenha um grupo com centro (cx, cy) e escala (sx, sy) relativa ao tamanho natural
+function drawGroupAt(c, parts, B, cx, cy, sx, sy, anchorBottom = false) {
+  c.save();
+  const ay = anchorBottom ? B.y1 : B.cy;
+  c.translate(cx, cy + (anchorBottom ? B.h / 2 : 0)); c.scale(sx, sy); c.translate(-B.cx, -ay);
+  parts.forEach(p => fill(c, p)); c.restore();
+}
+
+function cubeWave(i, t) { return pulse(t, LAND + Math.abs(i - 2) * 0.05, 0.26); } // cubos cedem quando o koala senta
+
+function drawCubesAndTiles(c, t, final = false) {
+  TILE_IDS.forEach((tid, i) => {
+    const T = TILE_BOX[i], B = BLOCK_BOX[i], tile = WG.get(tid), cube = LG.get(BLOCK_IDS[i]);
+    if (final) { cube.forEach(p => fill(c, p)); return; }
+    const pop = prog(t, TILE_START + i * TILE_STEP, TILE_DUR);
+    if (pop <= 0) return;
+    const q = prog(t, HOP0 + i * HOP_STEP, HOP_DUR);
+    if (q <= 0) { // peça plana aparecendo
+      const sc = Math.max(0, easeOutBack(pop, 2.2)), lift = (1 - easeOutCubic(pop)) * 60;
+      c.save(); c.globalAlpha = clamp(pop * 4); drawGroupAt(c, tile, T, T.cx, T.cy + lift, sc, sc); c.restore();
+    } else if (q < 0.18) { // agacha (antecipação)
+      const s = Math.sin(Math.PI * q / 0.18) * 0.14;
+      drawGroupAt(c, tile, T, T.cx, T.cy, 1 + s * 0.6, 1 - s, true);
+    } else if (q < 0.85) { // voo: arco + virada de carta (peça -> cubo)
+      const f = (q - 0.18) / 0.67, e = easeInOutSine(f);
+      const cx = lerp(T.cx, B.cx, e), cy = lerp(T.cy, B.cy, e) - 4 * 200 * f * (1 - f);
+      const flip = Math.abs(Math.cos(Math.PI * f)), stretch = 1 + 0.08 * Math.sin(Math.PI * f);
+      if (f < 0.5) drawGroupAt(c, tile, T, cx, cy, Math.max(flip, 0.02), stretch);
+      else drawGroupAt(c, cube, B, cx, cy, Math.max(flip, 0.02), stretch);
+    } else if (q < 1) { // pouso com amassado elástico
+      const k = (q - 0.85) / 0.15, s = Math.cos(k * Math.PI * 1.5) * (1 - k) * 0.16;
+      drawGroupAt(c, cube, B, B.cx, B.cy, 1 + s * 0.5, 1 - s, true);
+    }
+    if (q >= 1) { // já no lugar
+      const w = cubeWave(i, t);
+      if (w) { c.save(); c.globalCompositeOperation = 'source-over'; }
+      if (w) { drawGroupAt(c, cube, B, B.cx, B.cy, 1 + w * 0.025, 1 - w * 0.06, true); c.restore(); }
+      else cube.forEach(p => fill(c, p));
+    }
+  });
+}
+
+// deslocamento vertical do koala (positivo = abaixo da posição final, atrás dos cubos)
+function koalaY(t) {
+  if (t < PEEK0) return null;
+  if (t < PEEK1) return lerp(HIDDEN, PEEK_Y, easeOutBack(prog(t, PEEK0, PEEK1 - PEEK0), 1.4));
+  if (t < CROUCH) return PEEK_Y;
+  if (t < JUMP) return lerp(PEEK_Y, CROUCH_Y, easeInOutSine(prog(t, CROUCH, JUMP - CROUCH)));
+  if (t < LAND) { const u = prog(t, JUMP, JUMP_DUR); return CROUCH_Y * (1 - u) - 4 * JUMP_H * u * (1 - u); }
+  return 0;
+}
+
+function drawKoala(c, t, front, final = false) {
+  const y = final ? 0 : koalaY(t);
+  if (y === null) return;
+  const u = prog(t, JUMP, JUMP_DUR);
+  const inFront = final || t >= LAND || (t >= JUMP && (u > 0.66 || y < -20));
+  if (inFront !== front) return;
+  // corpo: estica no salto, amassa ao sentar
+  let sx = 1, sy = 1;
+  if (!final) {
+    if (t >= CROUCH && t < JUMP) { const s = 0.06 * easeInOutSine(prog(t, CROUCH, JUMP - CROUCH)); sx = 1 + s * 0.5; sy = 1 - s; }
+    else if (t >= JUMP && t < LAND) { const s = 0.07 * Math.sin(Math.PI * u); sx = 1 - s * 0.5; sy = 1 + s; }
+    else if (t >= LAND) { const q = prog(t, LAND, 0.5); const s = q < 1 ? Math.cos(q * Math.PI * 3) * Math.pow(1 - q, 2) * 0.08 : 0; sx = 1 + s * 0.6; sy = 1 - s; }
+  }
+  // olhos olhando para os lados enquanto espia
+  const look = final ? 0 : (pulse(t, PEEK1 + 0.02, 0.09) * -6 + pulse(t, PEEK1 + 0.1, 0.09) * 6);
+  // orelhas: mexidinha ao espiar + balanço depois de sentar
+  let earL = 0, earR = 0;
+  if (!final) {
+    earL += pulse(t, PEEK1, 0.08) * 0.14; earR -= pulse(t, PEEK1 + 0.08, 0.08) * 0.14;
+    const eq = prog(t, EARS, 0.6); if (eq > 0 && eq < 1) { const w = Math.sin(eq * Math.PI * 4) * 0.10 * (1 - eq); earL -= w; earR += w; }
+  }
+  // pezinhos balançando de alegria
+  let fl = 0, fr = 0;
+  { const fq = final ? 1 : prog(t, FEET, 0.42); if (fq > 0 && fq < 1) { const w = Math.sin(fq * Math.PI * 4) * 0.12 * (1 - fq); fl = w; fr = w; } }
+  const tilt = final ? 0 : 0.07 * easeInOutSine(pulse(t, TILT, 0.6));
+  const blink = final ? 1 : 1 - pulse(t, BLINK, 0.18) * 0.92;
+
+  c.save();
+  if (!front) { c.beginPath(); c.rect(0, 0, W, 1221); c.clip(); } // atrás dos cubos: o chão esconde o resto
+  c.translate(ANCHOR.x, ANCHOR.y + y); c.scale(sx, sy); c.translate(-ANCHOR.x, -ANCHOR.y);
+  const rot = (P, a) => { if (a) { c.translate(P.x, P.y); c.rotate(a); c.translate(-P.x, -P.y); } };
+  for (const id of KOALA_IDS) {
+    c.save();
+    const isHead = id === 'cabeca' || id.startsWith('orelha');
+    if (isHead) rot(NECK, tilt);
+    if (id === 'orelha-esquerda') rot(PIVOT_L, -earL);
+    if (id === 'orelha-direita') rot(PIVOT_R, earR);
+    if (id === 'pe-esquerdo') rot(PIV_FL, -fl);
+    if (id === 'pe-direito') rot(PIV_FR, fr);
+    for (const p of LG.get(id)) {
+      const eye = p.id.replace('brilho-', '');
+      if (EYE[eye]) {
+        if (p.id.startsWith('brilho') && blink < 0.6) continue;
+        const E = EYE[eye]; c.save(); c.translate(look, 0);
+        c.translate(E.cx, E.cy); c.scale(1, blink); c.translate(-E.cx, -E.cy); fill(c, p); c.restore();
+      } else fill(c, p);
+    }
+    c.restore();
+  }
+  c.restore();
+}
+
+function drawScene(c, t) { drawKoala(c, t, false); drawCubesAndTiles(c, t); drawKoala(c, t, true); }
+function drawLogoFinal(c) { drawCubesAndTiles(c, DURATION, true); drawKoala(c, DURATION, true, true); }
+
+function sweep(drawFn, t, start, dur, x0, x1, y0, y1) {
+  const q = prog(t, start, dur);
+  if (q <= 0 || q >= 1) return;
+  const c = tmp.getContext('2d');
+  c.setTransform(1, 0, 0, 1, 0, 0); c.globalCompositeOperation = 'source-over'; c.globalAlpha = 1;
+  c.clearRect(0, 0, CW, CH); c.setTransform(...VIEW); drawFn(c);
+  c.globalCompositeOperation = 'source-atop';
+  const sx = lerp(x0 - 200, x1 + 200, easeInOutSine(q));
+  const cy = (y0 + y1) / 2, gr = c.createLinearGradient(sx - 90, cy - 30, sx + 90, cy + 30);
+  gr.addColorStop(0, 'rgba(255,255,255,0)'); gr.addColorStop(.5, 'rgba(255,255,255,.38)'); gr.addColorStop(1, 'rgba(255,255,255,0)');
+  c.fillStyle = gr; c.fillRect(x0 - 50, y0 - 50, x1 - x0 + 100, y1 - y0 + 100);
+  c.globalCompositeOperation = 'source-over';
+  g.save(); g.setTransform(1, 0, 0, 1, 0, 0); g.drawImage(tmp, 0, 0); g.restore();
+}
+
+function drawStar(x, y, r, a) {
+  g.save(); g.globalAlpha = a; g.translate(x, y);
+  g.fillStyle = '#ffffff'; g.shadowColor = 'rgba(255,255,255,.9)'; g.shadowBlur = 16;
+  g.beginPath(); g.moveTo(0, -r); g.quadraticCurveTo(0, 0, r, 0); g.quadraticCurveTo(0, 0, 0, r);
+  g.quadraticCurveTo(0, 0, -r, 0); g.quadraticCurveTo(0, 0, 0, -r); g.fill(); g.restore();
+}
+function drawSparkles(t) {
+  sparkles.forEach(([x, y, r], i) => {
+    const q = prog(t, SPARKLE_START + i * 0.06, 0.55);
+    if (q <= 0 || q >= 1) return;
+    const k = Math.sin(Math.PI * q); drawStar(x, y, r * (0.4 + 0.8 * k), k * 0.95);
+  });
+  const pp = prog(t, LAND - 0.02, 0.5);                        // faíscas quando ele senta
+  if (pp > 0 && pp < 1) for (let i = 0; i < 12; i++) {
+    const ang = Math.PI + (i / 11) * Math.PI, d = 40 + easeOutCubic(pp) * 230;
+    drawStar(540 + Math.cos(ang) * d * 1.3, 1120 + Math.sin(ang) * d * 0.55, 11 * (1 - pp), 1 - pp);
+  }
+}
+
+function render(t) {
+  g.setTransform(1, 0, 0, 1, 0, 0); g.globalAlpha = 1;
+  g.fillStyle = PARTS.bg; g.fillRect(0, 0, CW, CH);
+  g.setTransform(...VIEW);
+  if (t >= DURATION - 1e-6) { drawLogoFinal(g); return; }   // último quadro = logo vetorial exato
+  drawScene(g, t);
+  if (t < HOP0) sweep(c => drawCubesAndTiles(c, t), t, SWEEP1, 0.4, 300, 790, 910, 1035);
+  else sweep(c => drawScene(c, t), t, SWEEP2, 0.7, 300, 770, 715, 1232);
+  drawSparkles(t);
+}
+
+// ---------- som (Web Audio, sintetizado)
+function buildAudio(ctx) {
+  const master = ctx.createGain(); master.gain.value = 0.85;
+  const comp = ctx.createDynamicsCompressor(); comp.threshold.value = -14; comp.ratio.value = 4;
+  master.connect(comp); comp.connect(ctx.destination);
+  const conv = ctx.createConvolver();
+  const len = Math.floor(ctx.sampleRate * 2.2), ir = ctx.createBuffer(2, len, ctx.sampleRate);
+  let seed = 7; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  for (let ch = 0; ch < 2; ch++) { const d = ir.getChannelData(ch); for (let i = 0; i < len; i++) d[i] = (rnd() * 2 - 1) * Math.pow(1 - i / len, 3); }
+  conv.buffer = ir;
+  const wet = ctx.createGain(); wet.gain.value = 0.32; conv.connect(wet); wet.connect(master);
+  const noiseBuf = ctx.createBuffer(1, Math.floor(ctx.sampleRate * 1.5), ctx.sampleRate);
+  { const d = noiseBuf.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = rnd() * 2 - 1; }
+  const out = (node, send = 0.5) => { node.connect(master); const s = ctx.createGain(); s.gain.value = send; node.connect(s); s.connect(conv); };
+  const env = (gn, t, a, peak, decay) => { gn.gain.setValueAtTime(0.0001, t); gn.gain.exponentialRampToValueAtTime(peak, t + a); gn.gain.exponentialRampToValueAtTime(0.0001, t + a + decay); };
+  const osc = (type, f, t, dur) => { const o = ctx.createOscillator(); o.type = type; o.frequency.setValueAtTime(f, t); o.start(t); o.stop(t + dur + 0.05); return o; };
+  const noise = (t, dur) => { const n = ctx.createBufferSource(); n.buffer = noiseBuf; n.start(t); n.stop(t + dur + 0.05); return n; };
+  return {
+    marimba(f, t, v = 0.35) {
+      const g1 = ctx.createGain(); env(g1, t, 0.004, v, 0.7); osc('sine', f, t, 0.8).connect(g1);
+      const g2 = ctx.createGain(); env(g2, t, 0.002, v * 0.35, 0.12); osc('sine', f * 3.93, t, 0.2).connect(g2);
+      out(g1, 0.35); out(g2, 0.2);
+    },
+    tok(t, v = 0.25, f = 1600) {
+      const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = f; bp.Q.value = 4;
+      const gn = ctx.createGain(); env(gn, t, 0.002, v, 0.06); noise(t, 0.1).connect(bp); bp.connect(gn); out(gn, 0.15);
+    },
+    whoosh(t, dur = 0.45, v = 0.2, f0 = 350, f1 = 3800) {
+      const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = 1.2;
+      bp.frequency.setValueAtTime(f0, t); bp.frequency.exponentialRampToValueAtTime(f1, t + dur);
+      const gn = ctx.createGain(); gn.gain.setValueAtTime(0.0001, t);
+      gn.gain.exponentialRampToValueAtTime(v, t + dur * 0.7); gn.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      noise(t, dur).connect(bp); bp.connect(gn); out(gn, 0.5);
+    },
+    slide(f0, f1, t, dur, v = 0.07) {
+      const o = osc('triangle', f0, t, dur); o.frequency.exponentialRampToValueAtTime(f1, t + dur);
+      const gn = ctx.createGain(); gn.gain.setValueAtTime(0.0001, t); gn.gain.exponentialRampToValueAtTime(v, t + 0.05);
+      gn.gain.setValueAtTime(v, t + dur - 0.06); gn.gain.exponentialRampToValueAtTime(0.0001, t + dur); o.connect(gn); out(gn, 0.3);
+    },
+    thud(t, v = 0.5) {
+      const th = osc('sine', 150, t, 0.35); th.frequency.exponentialRampToValueAtTime(50, t + 0.3);
+      const gt = ctx.createGain(); env(gt, t, 0.004, v, 0.3); th.connect(gt); out(gt, 0.1);
+      const o = osc('sine', 300, t, 0.2); o.frequency.exponentialRampToValueAtTime(900, t + 0.08);
+      const gn = ctx.createGain(); env(gn, t, 0.004, v * 0.5, 0.15); o.connect(gn); out(gn, 0.3);
+    },
+    boing(t, v = 0.1) {
+      const o = osc('triangle', 520, t, 0.55);
+      const lfo = osc('sine', 12, t, 0.55); const lg = ctx.createGain(); lg.gain.value = 70; lfo.connect(lg); lg.connect(o.frequency);
+      o.frequency.exponentialRampToValueAtTime(380, t + 0.5);
+      const gn = ctx.createGain(); env(gn, t, 0.01, v, 0.5); o.connect(gn); out(gn, 0.3);
+    },
+    tick(t, v = 0.07) {
+      const o = osc('sine', 2400, t, 0.06); o.frequency.exponentialRampToValueAtTime(1500, t + 0.04);
+      const gn = ctx.createGain(); env(gn, t, 0.002, v, 0.05); o.connect(gn); out(gn, 0.3);
+    },
+    bell(f, t, v = 0.15, dur = 1.8) {
+      [[1, 1], [2.76, 0.35], [5.4, 0.12]].forEach(([m, a]) => {
+        const gn = ctx.createGain(); env(gn, t, 0.004, v * a, dur / m); osc('sine', f * m, t, dur).connect(gn); out(gn, 0.6);
+      });
+    },
+    bubble(t, v = 0.04, f = 1000) {   // bolha / ponto surgindo
+      const o = osc('sine', f, t, 0.12); o.frequency.exponentialRampToValueAtTime(f * 1.9, t + 0.07);
+      const gn = ctx.createGain(); env(gn, t, 0.003, v, 0.08); o.connect(gn); out(gn, 0.35);
+    },
+    flutter(t, dur = 0.5, v = 0.07) {  // batida de asas / papel
+      const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 2200; bp.Q.value = 1.5;
+      const gn = ctx.createGain(); gn.gain.setValueAtTime(0.0001, t); gn.gain.exponentialRampToValueAtTime(v, t + 0.05);
+      gn.gain.setValueAtTime(v, t + dur - 0.1); gn.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      const am = ctx.createGain(); am.gain.value = 0.5; const lfo = osc('square', 18, t, dur); const lg = ctx.createGain(); lg.gain.value = 0.5;
+      lfo.connect(lg); lg.connect(am.gain);
+      noise(t, dur).connect(bp); bp.connect(am); am.connect(gn); out(gn, 0.3);
+    },
+    bloop(t, v = 0.2) {               // gota / líquido
+      const o = osc('sine', 620, t, 0.3); o.frequency.exponentialRampToValueAtTime(170, t + 0.22);
+      const gn = ctx.createGain(); env(gn, t, 0.006, v, 0.25); o.connect(gn); out(gn, 0.4);
+    },
+    pad(notes, t, end, v = 0.032) {
+      const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 1400;
+      const gn = ctx.createGain(); gn.gain.setValueAtTime(0.0001, t);
+      gn.gain.exponentialRampToValueAtTime(v, t + 0.9); gn.gain.setValueAtTime(v, end - 0.7); gn.gain.exponentialRampToValueAtTime(0.0001, end);
+      lp.connect(gn); out(gn, 0.7);
+      notes.forEach((f, i) => { for (const det of [-6, 6]) { const o = osc('triangle', f, t, end - t); o.detune.value = det + i; o.connect(lp); } });
+    }
+  };
+}
+const N = { C4: 261.63, E4: 329.63, G4: 392.0, B4: 493.88, C5: 523.25, D5: 587.33, E5: 659.25,
+            G5: 783.99, A5: 880.0, C6: 1046.5, D6: 1174.66, E6: 1318.5, G6: 1568.0, C7: 2093.0 };
+function scheduleSound(s, t0) {
+  s.pad([N.C4, N.E4, N.G4, N.B4], t0, t0 + DURATION);
+  // peças aparecendo: marimba subindo
+  [N.C5, N.D5, N.E5, N.G5, N.A5].forEach((f, i) => { const t = t0 + TILE_START + i * TILE_STEP + 0.07; s.marimba(f, t, 0.3); s.tok(t, 0.18); });
+  [N.C6, N.E6, N.G6].forEach((f, i) => s.bell(f, t0 + SWEEP1 + 0.08 + i * 0.07, 0.03, 0.5));
+  // cada cubo: pulinho (sobe) e batida de madeira ao cair, cada um numa nota
+  [N.G4, N.C5, N.E5, N.G5, N.C6].forEach((f, i) => {
+    const up = t0 + HOP0 + i * HOP_STEP + HOP_DUR * 0.16;
+    s.slide(420 + i * 40, 900 + i * 60, up, 0.12, 0.035);
+    const land = t0 + hopLand(i);
+    s.tok(land, 0.34, 700 + i * 90); s.tok(land + 0.004, 0.18, 2400); s.marimba(f, land, 0.16);
+  });
+  // koala espiando: "hum?" curioso, orelhinhas, olhadinhas
+  s.slide(260, 520, t0 + PEEK0 + 0.05, 0.28, 0.05);
+  s.tick(t0 + PEEK1, 0.05); s.tick(t0 + PEEK1 + 0.08, 0.05);
+  // impulso e pulo
+  s.slide(380, 1150, t0 + JUMP, 0.3, 0.07);
+  // senta: baque macio + cubos de madeira cedendo
+  s.thud(t0 + LAND, 0.45);
+  [0, 1, 2, 3, 4].forEach(i => s.tok(t0 + LAND + Math.abs(i - 2) * 0.05, 0.16, 650 + i * 70));
+  // pezinhos balançando
+  [0, 1, 2].forEach(i => s.marimba(N.E6 + i * 0, t0 + FEET + 0.05 + i * 0.1, 0.05));
+  s.boing(t0 + EARS + 0.02, 0.06);
+  s.tick(t0 + BLINK + 0.06);
+  // assinatura final
+  [N.C5, N.G5, N.E6].forEach((f, i) => s.bell(f, t0 + SWEEP2 + i * 0.03, 0.13, 1.5));
+  [N.C6, N.D6, N.E6, N.G6, N.C7].forEach((f, i) => s.bell(f, t0 + SPARKLE_START + 0.1 + i * 0.07, 0.035, 0.5));
+}
+
+// ---------- reprodução
+let actx = null, raf = 0, playing = false;
+const overlay = document.getElementById('overlay'), statusEl = document.getElementById('status');
+const playBtn = document.getElementById('play'), recBtn = document.getElementById('rec');
+function play() {
+  if (playing) return;
+  playing = true; overlay.classList.add('hidden');
+  if (actx) actx.close();
+  actx = new (window.AudioContext || window.webkitAudioContext)();
+  const t0 = actx.currentTime + 0.12;
+  scheduleSound(buildAudio(actx), t0);
+  const loop = () => {
+    const t = actx.currentTime - t0;
+    render(clamp(t, 0, DURATION));
+    if (t < DURATION + 0.2) raf = requestAnimationFrame(loop); else playing = false;
+  };
+  cancelAnimationFrame(raf); loop();
+}
+
+// ---------- exportação MP4 (quadro a quadro, WebCodecs)
+async function exportMP4(fps = 60) {
+  if (!window.VideoEncoder) throw new Error('Use Chrome ou Edge para exportar o vídeo.');
+  if (!window.Mp4Muxer) await new Promise((res, rej) => { const s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/mp4-muxer@5.1.3/build/mp4-muxer.min.js'; s.onload = res; s.onerror = rej; document.head.appendChild(s); });
+  const SR = 48000, NF = Math.round(DURATION * fps);
+  const off = new OfflineAudioContext(2, Math.round(SR * DURATION), SR);
+  scheduleSound(buildAudio(off), 0);
+  const buf = await off.startRendering();
+  const muxer = new Mp4Muxer.Muxer({ target: new Mp4Muxer.ArrayBufferTarget(),
+    video: { codec: 'avc', width: CW, height: CH, frameRate: fps }, audio: { codec: 'aac', sampleRate: SR, numberOfChannels: 2 }, fastStart: 'in-memory' });
+  let err = null;
+  const ve = new VideoEncoder({ output: (c, m) => muxer.addVideoChunk(c, m), error: e => err = e });
+  ve.configure({ codec: 'avc1.640033', width: CW, height: CH, bitrate: 14e6, framerate: fps });
+  const ae = new AudioEncoder({ output: (c, m) => muxer.addAudioChunk(c, m), error: e => err = e });
+  ae.configure({ codec: 'mp4a.40.2', sampleRate: SR, numberOfChannels: 2, bitrate: 192000 });
+  for (let f = 0; f < NF; f++) {
+    const t = Math.min(DURATION, f / fps + (f === NF - 1 ? 1 / fps : 0)); render(t);
+    const vf = new VideoFrame(canvas, { timestamp: Math.round(f / fps * 1e6), duration: Math.round(1e6 / fps) });
+    ve.encode(vf, { keyFrame: f % fps === 0 }); vf.close();
+    if (ve.encodeQueueSize > 8) await new Promise(r => setTimeout(r, 4));
+    if (f % 30 === 0) statusEl.textContent = `Gerando vídeo… ${Math.round(f / NF * 100)}%`;
+  }
+  const Lc = buf.getChannelData(0), Rc = buf.getChannelData(1), BLOCO = 1024;
+  for (let i = 0; i < buf.length; i += BLOCO) {
+    const n = Math.min(BLOCO, buf.length - i), data = new Float32Array(n * 2);
+    data.set(Lc.subarray(i, i + n), 0); data.set(Rc.subarray(i, i + n), n);
+    const ad = new AudioData({ format: 'f32-planar', sampleRate: SR, numberOfFrames: n, numberOfChannels: 2, timestamp: Math.round(i / SR * 1e6), data });
+    ae.encode(ad); ad.close();
+  }
+  await ve.flush(); await ae.flush(); muxer.finalize();
+  if (err) throw err;
+  return new Blob([muxer.target.buffer], { type: 'video/mp4' });
+}
+
+playBtn.onclick = play; overlay.onclick = play;
+recBtn.onclick = async () => {
+  recBtn.disabled = playBtn.disabled = true;
+  try {
+    const blob = await exportMP4();
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `logo-animado-${formato}.mp4`;
+    document.body.appendChild(a); a.click(); a.remove();
+    statusEl.textContent = `Vídeo salvo (MP4, ${CW}×${CH}, 60 fps, ${(blob.size / 1e6).toFixed(1)} MB)`;
+  } catch (e) { statusEl.textContent = 'Erro: ' + e.message; }
+  render(DURATION); recBtn.disabled = playBtn.disabled = false;
+};
+document.getElementById('fmt').onchange = e => { setFormato(e.target.value); render(DURATION); };
+render(DURATION);
+window.seek = render; window.setFormato = setFormato; window.exportMP4 = exportMP4;
+</script>
+</body>
+</html>
